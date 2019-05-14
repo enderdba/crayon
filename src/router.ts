@@ -4,6 +4,8 @@ import { Request } from './request'
 import { Response } from './response'
 import { handlerFunc } from './types'
 import { Group } from "./group";
+import { state } from './state'
+import { RoutingEventType, createEvent, RoutingEvent } from './events'
 
 export class Router {
     middleware: handlerFunc[] = []
@@ -15,23 +17,30 @@ export class Router {
     isLoading = true
 
     get events(): observe.Subject<any> {
-        const state = (window as any).crayon
-        return state.events
+        return state().events
     }
 
     onPopState = () => this.load()
+    eventListener: observe.Subscriber | undefined
 
     constructor() {
         window.addEventListener('popstate', this.onPopState)
+        this.eventListener = state().events.subscribe(e => this.onRoutingEvent(e))
     }
 
     destroy() {
+        this.eventListener && this.eventListener.unsubscribe()
         window.removeEventListener('popstate', this.onPopState)
+    }
+
+    onRoutingEvent(event: RoutingEvent) {
+        if (event.name === RoutingEventType.RoutingInit) {
+            this.load()
+        }
     }
 
     path(path: string, ...handlers: handlerFunc[]) {
         this.routes[path] = handlers
-        // this.load()
     }
 
     use(target: handlerFunc | Group) {
@@ -40,7 +49,6 @@ export class Router {
         } else {
             this.useHandler(target)
         }
-        // this.load()
     }
 
     useGroup(group: Group) {
@@ -68,15 +76,18 @@ export class Router {
             return
         }
         path = url.normalise(path)
-        window.history.pushState(null, document.title, path)
-        await this.load()
+        if (path === '') {
+            path = '/'
+        }
+        state().setRoute(path)
+        this.emit(createEvent(RoutingEventType.RoutingInit, path))
     }
 
     reload() {
         if (this.req) {
             return
         }
-        return this.load()
+        // return this.load()
     }
 
     // TODO figure out how to not kill the router
@@ -88,28 +99,26 @@ export class Router {
         window.history.back()
     }
 
-    emit(value: any) {
-        const state = (window as any).crayon
-        if (!state) {
-            return
-        }
-        state.events.next(value)
+    emit(value: RoutingEvent) {
+        state().events.next(value)
     }
 
     async load() {
         this.isLoading = true
         this.req = new Request()
         this.res = new Response()
-        this.emit({ name: 'ROUTING_START', ctx: { ...this.req} })
+        this.req.routePath = state().getRoute()
+
+        this.emit(createEvent(RoutingEventType.RoutingStart, { ...this.req }))
 
         const path = url.normalise(this.req.pathname)
         if (path !== this.req.pathname) {
-            window.history.replaceState(null, document.title, path)
+            state().replaceRoute(path)
         }
 
         this.res.redirect = (path: string) => {
             path = url.normalise(path)
-            window.history.pushState(null, document.title, path)
+            state().setRoute(path)
             this.isLoading = false
             this.load()
         }
@@ -119,7 +128,7 @@ export class Router {
         // Match and populate handlers
         let handlers: handlerFunc[] = []
         for (const key in this.routes) {
-            const params = url.matchPath(key, this.req.pathname)
+            const params = url.matchPath(key, this.req.routePath)
             if (!params) {
                 continue
             }
@@ -147,16 +156,12 @@ export class Router {
             await handler(this.req, this.res, this.state, (this as any))
         }
         this.isLoading = false
-        this.emit({ name: 'ROUTING_COMPLETE', ctx: { ...this.req} })
+        this.emit(createEvent(RoutingEventType.RoutingEnd, { ...this.req }))
     }
 }
 
 export const create = () => {
-    if (!(window as any).crayon) {
-        ;(window as any).crayon = {
-            events: observe.createSubject()
-        }
-    }
+    state()
     return new Router()
 }
 
